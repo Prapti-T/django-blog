@@ -1,94 +1,148 @@
-from django.shortcuts import render, redirect, get_object_or_404
-    #Helps to render HTML template with the given context
-from django.http import HttpResponseRedirect
-    #redirect the user to a different URL.
-from blog.models import Post, Comment, Category
-    #These are the models
-from blog.forms import CommentForm, PostForm
-    #form class for handling comments.
-from blog.serializer import PostSerializer, CategorySerializer, CommentSerializer
-from rest_framework import viewsets
+from django.shortcuts import get_object_or_404
+from .models import Post, Comment, Category
+from rest_framework.permissions import IsAuthenticated, AllowAny, BasePermission, SAFE_METHODS
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status, generics, filters
+from .serializer import (
+    SignupSerializer,
+    LoginSerializer,
+    PostSerializer,
+    CategorySerializer,
+    CommentSerializer,
+)
+from rest_framework_simplejwt.tokens import RefreshToken
 
-#Function for handling the blog index page, which lists all blog posts.
-def blog_index(request):
-    posts = Post.objects.all().order_by("-created_on")
-    context = {
-        'posts': posts,
+def get_tokens_for_user(user):
+    refresh = RefreshToken.for_user(user)
+    return {
+        'refresh': str(refresh),
+        'access': str(refresh.access_token),
     }
-    return render(request, 'blog/index.html', context)
-     #retrieves all Post obj from db and order DESC, pass to template
 
+#Custom permission to only allow authors of an object to edit or delete it.
+class IsAuthorOrReadOnly(BasePermission):
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS:
+            return True
+        return obj.author == request.user
+    
+#Auth views:
+#sign up
+class SignupView(APIView):
+    def post(self, request):
+        serializer = SignupSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            tokens = get_tokens_for_user(user)
+            return Response(tokens, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-#Function for handling the category page, which lists blog posts for a specific category.
-def blog_category(request, category):
-    posts = Post.objects.filter(
-        categories__name__contains = category).order_by("-created_on")
-    context = {
-        'category' : category,
-        'posts' : posts,
-    }
-    return render(request, "blog/category.html", context)
-    #Filters Post objects that have a category name containing the given category, orders them DESC, passes posts and category name to template
+#login
+class LoginView(APIView):
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.validated_data
+            tokens = get_tokens_for_user(user)
+            return Response(tokens, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+#Category views:
+# List all categories
+class CategoryList(generics.ListAPIView):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+    permission_classes = [AllowAny]
 
-#Function for handling detail view of a single blog post, including comments and handling new comment submissions.
-def blog_detail(request, pk):
-    post = Post.objects.get(pk=pk)  #retrieves post obj using primary key
-    form = CommentForm()
+# Create a new category
+class CategoryCreate(generics.CreateAPIView):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+    permission_classes = [IsAuthenticated]
 
-    #when user submits form, save to db and update comment list
-    if request.method == "POST":
-        form = CommentForm(request.POST)
-        if form.is_valid():
-            comment = Comment(
-                author = form.cleaned_data['author'],
-                body = form.cleaned_data['body'],
-                post = post,
-            )
-            comment.save()
-            return HttpResponseRedirect(request.path_info)
-    comments = Comment.objects.filter(post=post)
-    context = {
-        "post": post,
-        "comments": comments,
-        "form": CommentForm(),
-    }
-    return render(request, "blog/detail.html", context)
+#Post views:
+#List all posts
+class PostList(generics.ListAPIView):
+    queryset = Post.objects.all().order_by('-created_on')
+    serializer_class = PostSerializer
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['categories__name']
+    permission_classes = [AllowAny]
 
+#List posts by category
+class PostByCategoryList(generics.ListAPIView):
+    serializer_class = PostSerializer
+    permission_classes = [AllowAny]
 
-#Create new posts
-def create_post(request):
-    if request.method == 'POST':
-        form = PostForm(request.POST)
-        if form.is_valid():
-            post = Post(
-                title=form.cleaned_data['title'],
-                body=form.cleaned_data['body'],
-            )
-            post.save()
-            post.categories.set(form.cleaned_data['categories'])
-            return redirect('blog_detail', pk = post.pk)
-    else:
-        form = PostForm()
+    def get_queryset(self):
+        category_name = self.kwargs['category']
+        return Post.objects.filter(categories__name__icontains=category_name).order_by('-created_on')
 
-    return render(request, 'blog/create_post.html', {'form': form})
+#Detail of a post including comments
+class PostDetail(generics.RetrieveAPIView):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+    permission_classes = [AllowAny]
+
+#Create a new post
+class PostCreate(generics.CreateAPIView):
+    serializer_class = PostSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        serializer.save()
 
 #Update post
-def post_edit(request, pk):
-    post = get_object_or_404(Post, pk=pk)
-    if request.method == "POST":
-        form = PostForm(request.POST, instance=post)
-        if form.is_valid():
-            form.save()
-            return redirect('blog_detail', pk=post.pk)
-    else:
-        form = PostForm(instance=post)
-    return render(request, 'blog/post_form.html', {'form': form})
+class PostUpdate(generics.UpdateAPIView):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+    permission_classes = [IsAuthenticated, IsAuthorOrReadOnly]
 
-# Delete post
-def post_delete(request, pk):
-    post = get_object_or_404(Post, pk=pk)
-    if request.method == "POST":
-        post.delete()
-        return redirect('home')  # or your blog list view
-    return render(request, 'blog/post_confirm_delete.html', {'post': post})
+#Delete post
+class PostDelete(generics.DestroyAPIView):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+    permission_classes = [IsAuthenticated, IsAuthorOrReadOnly]
+
+#Comment views:
+#List comments for a post
+class CommentList(generics.ListAPIView):
+    serializer_class = CommentSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        post_id = self.kwargs['post_pk']
+        return Comment.objects.filter(post__id=post_id).order_by('-created_on')
+
+#Get single comment
+class CommentDetail(generics.RetrieveAPIView):
+    serializer_class = CommentSerializer
+    permission_classes = [AllowAny]
+
+    def get_object(self):
+        post_pk = self.kwargs['post_pk']
+        comment_pk = self.kwargs['pk']
+        return get_object_or_404(Comment, pk=comment_pk, post__pk=post_pk)
+    
+#Create comment
+class CommentCreate(generics.CreateAPIView):
+    serializer_class = CommentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        post_id = self.kwargs['post_pk']
+        post = get_object_or_404(Post, pk=post_id)
+        serializer.save(post=post)
+    
+#Update comments    
+class CommentUpdate(generics.UpdateAPIView):
+    queryset = Comment.objects.all()
+    serializer_class = CommentSerializer
+    permission_classes = [IsAuthenticated, IsAuthorOrReadOnly]
+
+#Delete comments
+class CommentDelete(generics.DestroyAPIView):
+    queryset = Comment.objects.all()
+    serializer_class = CommentSerializer
+    permission_classes = [IsAuthenticated, IsAuthorOrReadOnly]
